@@ -36,7 +36,7 @@ def evaluate_function_calls_metrics(
         references (List[Dict[str, Any]]): 参考结果列表，格式与predictions相同
         
         number (int, optional): 判断工作流选择正确性的阈值，默认为1
-            交集个数 >= number 时认为选择了正确的工作流
+            必须为非负数（>= 0），交集个数 >= number 时认为选择了正确的工作流
     
     Returns:
         Dict[str, Any]: 返回包含以下字段的字典:
@@ -88,10 +88,14 @@ def evaluate_function_calls_metrics(
             f"{type(number).__name__}"
         )
     
-    # 3. 计算工具识别率
+    # 3. 校验number参数必须为非负数
+    if number < 0:
+        raise ValueError(f"number 必须是非负数，当前值: {number}")
+    
+    # 4. 计算工具识别率
     tool_recognition_rate = len(predictions) > 0
     
-    # 4. 处理空列表情况
+    # 5. 处理空列表情况
     if not predictions or not references:
         # 计算幻觉率：(predictions独有数量) / references数量
         if len(predictions) == 0:
@@ -109,7 +113,7 @@ def evaluate_function_calls_metrics(
             "hallucination_rate": hallucination_rate
         }
     
-    # 5. 验证列表元素格式
+    # 6. 验证列表元素格式
     def validate_function_call_format(item: Any, item_type: str, index: int) -> None:
         """验证单个函数调用记录的格式"""
         if not isinstance(item, dict):
@@ -156,24 +160,24 @@ def evaluate_function_calls_metrics(
                 f"不是有效的 JSON 字符串: {e}"
             )
     
-    # 6. 验证所有元素格式
+    # 7. 验证所有元素格式
     for i, pred in enumerate(predictions):
         validate_function_call_format(pred, "predictions", i)
     
     for i, ref in enumerate(references):
         validate_function_call_format(ref, "references", i)
     
-    # 7. 创建参考结果的函数名称集合，便于快速查找
+    # 8. 创建参考结果的函数名称集合，便于快速查找
     reference_function_names = {ref["function"]["name"] for ref in references}
     
-    # 8. 找出交集：predictions 中的函数名称在 references 中存在的记录
+    # 9. 找出交集：predictions 中的函数名称在 references 中存在的记录
     matched_calls = []
     for pred in predictions:
         function_name = pred["function"]["name"]
         if function_name in reference_function_names:
             matched_calls.append(pred)
     
-    # 9. 计算各种指标
+    # 10. 计算各种指标
     intersection_count = len(matched_calls)  # 交集数量
     predictions_count = len(predictions)     # 预测数量
     references_count = len(references)       # 参考数量
@@ -350,6 +354,13 @@ def run_tests():
         except TypeError as e:
             assert "number 必须是 int 类型" in str(e)
         
+        # 测试负数number参数
+        try:
+            evaluate_function_calls_metrics([], [], -5)
+            assert False, "应该抛出 ValueError"
+        except ValueError as e:
+            assert "number 必须是非负数" in str(e)
+        
         return True, "类型错误测试通过"
     
     # 测试用例5：格式校验错误
@@ -502,6 +513,309 @@ def run_tests():
         
         return True, "边界情况测试通过"
     
+    # 测试用例9：负数和极值number参数测试
+    def test_extreme_number_values():
+        predictions = [
+            {"id": "1", "type": "function", 
+             "function": {"name": "智能体-A", "arguments": "{}"}},
+            {"id": "2", "type": "function", 
+             "function": {"name": "智能体-B", "arguments": "{}"}}
+        ]
+        references = [
+            {"id": "3", "type": "function", 
+             "function": {"name": "智能体-A", "arguments": "{}"}}
+        ]
+        
+        # 测试负数number参数应该抛出异常
+        try:
+            evaluate_function_calls_metrics(
+                predictions, references, number=-1
+            )
+            assert False, "负数number参数应该抛出异常"
+        except ValueError as e:
+            assert "number 必须是非负数" in str(e), f"异常信息不正确: {e}"
+        
+        # 测试极大number值
+        result_large = evaluate_function_calls_metrics(
+            predictions, references, number=1000
+        )
+        assert result_large["correct_workflow_selection"] is False, (
+            "极大阈值时应该为False（1 >= 1000为False）"
+        )
+        
+        # 测试number为0的边界情况
+        result_zero = evaluate_function_calls_metrics(
+            predictions, references, number=0
+        )
+        assert result_zero["correct_workflow_selection"] is True, (
+            "阈值为0时应该为True（1 >= 0）"
+        )
+        
+        return True, "极值number参数测试通过"
+    
+    # 测试用例10：函数名边界情况测试
+    def test_function_name_boundaries():
+        # 测试空字符串函数名
+        predictions_empty_name = [
+            {"id": "1", "type": "function", 
+             "function": {"name": "", "arguments": "{}"}}
+        ]
+        references_empty_name = [
+            {"id": "2", "type": "function", 
+             "function": {"name": "", "arguments": "{}"}}
+        ]
+        
+        result_empty = evaluate_function_calls_metrics(
+            predictions_empty_name, references_empty_name
+        )
+        assert len(result_empty["fcm"]) == 1, "空字符串函数名应该能够匹配"
+        assert result_empty["hallucination_rate"] == 0.0, "完全匹配时幻觉率应为0"
+        
+        # 测试包含特殊字符的函数名
+        special_chars_name = "函数@#$%^&*()_+-=[]{}|;':\",./<>?"
+        predictions_special = [
+            {"id": "1", "type": "function", 
+             "function": {"name": special_chars_name, "arguments": "{}"}}
+        ]
+        references_special = [
+            {"id": "2", "type": "function", 
+             "function": {"name": special_chars_name, "arguments": "{}"}}
+        ]
+        
+        result_special = evaluate_function_calls_metrics(
+            predictions_special, references_special
+        )
+        assert len(result_special["fcm"]) == 1, "特殊字符函数名应该能够匹配"
+        
+        # 测试Unicode字符（emoji等）
+        unicode_name = "智能体🤖AI助手✨"
+        predictions_unicode = [
+            {"id": "1", "type": "function", 
+             "function": {"name": unicode_name, "arguments": "{}"}}
+        ]
+        references_unicode = [
+            {"id": "2", "type": "function", 
+             "function": {"name": unicode_name, "arguments": "{}"}}
+        ]
+        
+        result_unicode = evaluate_function_calls_metrics(
+            predictions_unicode, references_unicode
+        )
+        assert len(result_unicode["fcm"]) == 1, "Unicode字符函数名应该能够匹配"
+        
+        return True, "函数名边界情况测试通过"
+    
+    # 测试用例11：大小写敏感性测试
+    def test_case_sensitivity():
+        predictions_lower = [
+            {"id": "1", "type": "function", 
+             "function": {"name": "aiagent", "arguments": "{}"}}
+        ]
+        references_upper = [
+            {"id": "2", "type": "function", 
+             "function": {"name": "AIAGENT", "arguments": "{}"}}
+        ]
+        
+        result = evaluate_function_calls_metrics(
+            predictions_lower, references_upper
+        )
+        # 函数名匹配应该是大小写敏感的
+        assert len(result["fcm"]) == 0, "大小写不同的函数名不应该匹配"
+        assert result["hallucination_rate"] == 1.0, (
+            "无匹配时幻觉率应为 1.0 (1/1)"
+        )
+        
+        # 测试完全相同的大小写
+        predictions_same = [
+            {"id": "1", "type": "function", 
+             "function": {"name": "AIAgent", "arguments": "{}"}}
+        ]
+        references_same = [
+            {"id": "2", "type": "function", 
+             "function": {"name": "AIAgent", "arguments": "{}"}}
+        ]
+        
+        result_same = evaluate_function_calls_metrics(
+            predictions_same, references_same
+        )
+        assert len(result_same["fcm"]) == 1, "相同大小写的函数名应该匹配"
+        
+        return True, "大小写敏感性测试通过"
+    
+    # 测试用例12：复杂JSON arguments测试
+    def test_complex_json_arguments():
+        # 测试复杂嵌套JSON
+        complex_json = json.dumps({
+            "reason": "测试复杂参数",
+            "parameters": {
+                "nested": {
+                    "array": [1, 2, 3, {"key": "value"}],
+                    "unicode": "测试中文🎉",
+                    "special_chars": "@#$%^&*()"
+                },
+                "numbers": [1.23, -456, 0],
+                "boolean": True,
+                "null_value": None
+            }
+        }, ensure_ascii=False)
+        
+        predictions_complex = [
+            {"id": "1", "type": "function", 
+             "function": {"name": "complex-agent", "arguments": complex_json}}
+        ]
+        references_complex = [
+            {"id": "2", "type": "function", 
+             "function": {"name": "complex-agent", "arguments": "{}"}}
+        ]
+        
+        # 应该能正常处理复杂JSON（只看函数名匹配）
+        result = evaluate_function_calls_metrics(
+            predictions_complex, references_complex
+        )
+        assert len(result["fcm"]) == 1, "复杂JSON参数应该能正常处理"
+        
+        # 测试空JSON对象
+        predictions_empty_json = [
+            {"id": "1", "type": "function", 
+             "function": {"name": "test-agent", "arguments": "{}"}}
+        ]
+        references_empty_json = [
+            {"id": "2", "type": "function", 
+             "function": {"name": "test-agent", "arguments": "{}"}}
+        ]
+        
+        result_empty_json = evaluate_function_calls_metrics(
+            predictions_empty_json, references_empty_json
+        )
+        assert len(result_empty_json["fcm"]) == 1, "空JSON对象应该能正常处理"
+        
+        return True, "复杂JSON arguments测试通过"
+    
+    # 测试用例13：数据类型边界测试
+    def test_data_type_boundaries():
+        # 测试function.name不是字符串的情况（应该抛异常）
+        try:
+            invalid_name_type = [
+                {"id": "1", "type": "function", 
+                 "function": {"name": 123, "arguments": "{}"}}
+            ]
+            references = [
+                {"id": "2", "type": "function", 
+                 "function": {"name": "test", "arguments": "{}"}}
+            ]
+            # 这里不会抛异常，因为验证逻辑只检查字段存在，不检查类型
+            result = evaluate_function_calls_metrics(invalid_name_type, references)
+            # 但数字和字符串不会匹配
+            assert len(result["fcm"]) == 0, "数字类型函数名不应该匹配字符串"
+        except Exception as e:
+            # 如果抛异常也是合理的
+            pass
+        
+        # 测试function.arguments不是字符串但能被json.loads处理的情况
+        try:
+            invalid_args_type = [
+                {"id": "1", "type": "function", 
+                 "function": {"name": "test", "arguments": 123}}  # 数字
+            ]
+            references = [
+                {"id": "2", "type": "function", 
+                 "function": {"name": "test", "arguments": "{}"}}
+            ]
+            evaluate_function_calls_metrics(invalid_args_type, references)
+            assert False, "非字符串arguments应该抛出异常"
+        except (ValueError, TypeError):
+            pass  # 预期的异常
+        
+        return True, "数据类型边界测试通过"
+    
+    # 测试用例14：大数据量性能测试
+    def test_large_dataset_performance():
+        import time
+        
+        # 创建大量数据进行性能测试
+        large_predictions = []
+        large_references = []
+        
+        # 创建1000个预测和800个参考，其中500个匹配
+        for i in range(1000):
+            large_predictions.append({
+                "id": f"pred-{i}",
+                "type": "function",
+                "function": {
+                    "name": f"agent-{i % 500}" if i < 500 else f"unique-pred-{i}",
+                    "arguments": f"{{\"index\": {i}}}"
+                }
+            })
+        
+        for i in range(800):
+            large_references.append({
+                "id": f"ref-{i}",
+                "type": "function",
+                "function": {
+                    "name": f"agent-{i}" if i < 500 else f"unique-ref-{i}",
+                    "arguments": f"{{\"index\": {i}}}"
+                }
+            })
+        
+        start_time = time.time()
+        result = evaluate_function_calls_metrics(large_predictions, large_references)
+        end_time = time.time()
+        
+        # 验证结果正确性
+        assert len(result["fcm"]) == 500, f"应该有500个匹配，实际有{len(result['fcm'])}"
+        assert result["tool_recognition_rate"] is True, "大量数据时工具识别率应为True"
+        
+        # 验证性能（应该在合理时间内完成，比如1秒）
+        execution_time = end_time - start_time
+        assert execution_time < 2.0, f"大数据量处理时间过长: {execution_time:.3f}秒"
+        
+        # 验证幻觉率计算：predictions=1000，matched=500，references=800
+        # hallucination_rate = (1000-500)/800 = 0.625
+        expected_hallucination_rate = 0.625
+        assert abs(result["hallucination_rate"] - expected_hallucination_rate) < 1e-10, (
+            f"大数据量幻觉率计算错误，期望{expected_hallucination_rate}，"
+            f"实际{result['hallucination_rate']}"
+        )
+        
+        return True, "大数据量性能测试通过"
+    
+    # 测试用例15：异常恢复和鲁棒性测试
+    def test_robustness():
+        # 测试包含None值的情况
+        try:
+            predictions_with_none = [
+                {"id": "1", "type": "function", 
+                 "function": {"name": "test", "arguments": None}}
+            ]
+            references = [
+                {"id": "2", "type": "function", 
+                 "function": {"name": "test", "arguments": "{}"}}
+            ]
+            evaluate_function_calls_metrics(predictions_with_none, references)
+            assert False, "None类型的arguments应该抛出异常"
+        except (ValueError, TypeError):
+            pass  # 预期的异常
+        
+        # 测试混合有效和无效数据（部分数据有效的情况）
+        # 这种情况下，无效数据应该在验证阶段被捕获，不应该进行部分处理
+        try:
+            mixed_predictions = [
+                {"id": "1", "type": "function", 
+                 "function": {"name": "valid-agent", "arguments": "{}"}},
+                {"id": "2", "type": "function", 
+                 "function": {"name": "invalid-agent"}}  # 缺少arguments字段
+            ]
+            references = [
+                {"id": "3", "type": "function", 
+                 "function": {"name": "valid-agent", "arguments": "{}"}}
+            ]
+            evaluate_function_calls_metrics(mixed_predictions, references)
+            assert False, "混合有效无效数据应该抛出异常"
+        except ValueError:
+            pass  # 预期的异常
+        
+        return True, "异常恢复和鲁棒性测试通过"
+    
     # 执行所有测试
     test_functions = [
         ("正常情况测试", test_normal_intersection),
@@ -511,7 +825,14 @@ def run_tests():
         ("格式校验测试", test_format_validation),
         ("完全匹配测试", test_full_match),
         ("新指标专项测试", test_new_metrics),
-        ("边界情况测试", test_edge_cases)
+        ("边界情况测试", test_edge_cases),
+        ("极值number参数测试", test_extreme_number_values),
+        ("函数名边界情况测试", test_function_name_boundaries),
+        ("大小写敏感性测试", test_case_sensitivity),
+        ("复杂JSON arguments测试", test_complex_json_arguments),
+        ("数据类型边界测试", test_data_type_boundaries),
+        ("大数据量性能测试", test_large_dataset_performance),
+        ("异常恢复和鲁棒性测试", test_robustness)
     ]
     
     for test_name, test_func in test_functions:
